@@ -1,21 +1,26 @@
-import logging, requests
+import logging, requests, os
+from marshmallow.fields import Email
 from math import cos
 from typing import Sequence
 from datetime import datetime
-from flask import Flask, request, jsonify
+from dotenv import load_dotenv
+from config import AppConfig
+from flask import Flask, json, request, jsonify
 from flask_cors import CORS
-from flask_sqlalchemy import SQLAlchemy
-from flask_marshmallow import Marshmallow
+from utils.db import db
+from utils.json import ma
+from utils.firebase import decode_token
 
-app = Flask(__name__)
+load_dotenv()
+
+app: Flask = Flask(__name__)
+app.config.from_object(AppConfig)
 CORS(app)
 
-app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:postgres@localhost:15432/campsite_finder'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db.init_app(app)
+ma.init_app(app)
 
-db = SQLAlchemy(app)
-
-ma = Marshmallow(app)
+app.app_context().push()
 
 class Facility(db.Model):
     facility_id = db.Column(db.Text, primary_key=True)
@@ -28,6 +33,8 @@ class Facility(db.Model):
     reservable = db.Column(db.Boolean)
     enabled = db.Column(db.Boolean)
     medias = db.relationship('Media', backref='facility', lazy='joined')
+    parent_recarea_id = db.Column(db.Text, db.ForeignKey('recarea.recarea_id'))
+    recarea = db.relationship('Recarea', lazy='joined')
 
     def __repr__(self) -> str:
         return '<Facility ID: %r>' % self.facility_id
@@ -45,20 +52,90 @@ class Media(db.Model):
     def __repr__(self) -> str:
         return '<Media ID: %r>' % self.media_id
 
+class Recarea(db.Model):
+    recarea_id = db.Column(db.Text, primary_key=True)
+    recarea_name = db.Column(db.Text)
+
+class User(db.Model):
+    uid = db.Column(db.Text, primary_key=True)
+    email = db.Column(db.Text)
+
 class FacilitySchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = Facility
     medias = ma.Nested('MediaSchema', many=True)
+    recarea = ma.Nested('RecareaSchema')
 
 class MediaSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = Media
+
+class RecareaSchema(ma.SQLAlchemyAutoSchema):
+    class Meta:
+        model = Recarea
+
+class UserSchema(ma.SQLAlchemyAutoSchema):
+    class Meta:
+        model = User
 
 facility_schema = FacilitySchema()
 facilities_schema = FacilitySchema(many=True)
 
 media_schema = MediaSchema()
 medias_schema = MediaSchema(many=True)
+
+recarea_schema = MediaSchema()
+recareas_schema = MediaSchema(many=True)
+
+user_schema = UserSchema()
+users_schema = UserSchema(many=True)
+
+@app.route('/api/user', methods=['GET'])
+def get_user():
+    id_token: str = request.get_json()['id_token']
+    decoded = decode_token(id_token=id_token)
+
+@app.route('/api/user/signup', methods=['POST'])
+def signup_user() -> None:
+    try:
+        id_token: str = request.get_json()['id_token']
+        decoded = decode_token(id_token=id_token)
+
+        user: User = User.query.get(decoded['uid'])
+        if user:
+            return jsonify({ 'status': True, 'message': 'User already exists', 'user': user_schema.dump(user) })
+
+        user: User = User(uid=decoded['uid'], email=decoded['email'])
+        db.session.add(user)
+        db.session.commit()
+        return jsonify({ 'status': True, 'user': user_schema.dump(user) })
+    except Exception as e:
+        return jsonify({ 'status': False, 'message': 'Failed to add user' })
+
+@app.route('/api/user/login', methods=['POST'])
+def login_user() -> None:
+    try:
+        id_token: str = request.get_json()['id_token']
+        decoded = decode_token(id_token=id_token)
+
+        user: User = User.query.get(decoded['uid'])
+        if user:
+            return jsonify({ 'status': True, 'user': user_schema.dump(user) })
+
+        return jsonify({ 'status': False, 'message': 'User not found' })
+    except Exception as e:
+        return jsonify({ 'status': False, 'message': 'Session expired' })
+
+@app.route('/api/facility/detail', methods=['POST'])
+def get_campground() -> None:
+    try:
+        facility_id: str = request.get_json()['facility_id']
+        facility: Facility = Facility.query.get(facility_id)
+        if facility:
+            return jsonify({ 'status': True, 'facility': facility_schema.dump(facility) })
+        return jsonify({ 'status': False, 'message': 'Facility not found' })
+    except Exception as e:
+        return jsonify({ 'status': False, 'message': 'An error occurred' })
 
 @app.route('/api/search', methods=['POST'])
 def search():
