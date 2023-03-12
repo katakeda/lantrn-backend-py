@@ -4,6 +4,7 @@ from math import cos
 from typing import Sequence
 from datetime import datetime
 from dotenv import load_dotenv
+from sqlalchemy.orm import backref, lazyload
 from config import AppConfig
 from flask import Flask, json, request, jsonify
 from flask_cors import CORS
@@ -33,6 +34,7 @@ class Facility(db.Model):
     reservable = db.Column(db.Boolean)
     enabled = db.Column(db.Boolean)
     medias = db.relationship('Media', backref='facility', lazy='joined')
+    reviews = db.relationship('FacilityReview', backref='facility', lazy='joined')
     parent_recarea_id = db.Column(db.Text, db.ForeignKey('recarea.recarea_id'))
     recarea = db.relationship('Recarea', lazy='joined')
 
@@ -52,6 +54,13 @@ class Media(db.Model):
     def __repr__(self) -> str:
         return '<Media ID: %r>' % self.media_id
 
+class FacilityReview(db.Model):
+    review_id = db.Column(db.Integer, primary_key=True)
+    facility_id = db.Column(db.Text, db.ForeignKey('facility.facility_id'))
+    uid = db.Column(db.Text, db.ForeignKey('user.uid'))
+    rating = db.Column(db.Integer)
+    comment = db.Column(db.Text)
+
 class Recarea(db.Model):
     recarea_id = db.Column(db.Text, primary_key=True)
     recarea_name = db.Column(db.Text)
@@ -64,11 +73,16 @@ class FacilitySchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = Facility
     medias = ma.Nested('MediaSchema', many=True)
+    reviews = ma.Nested('FacilityReviewSchema', many=True)
     recarea = ma.Nested('RecareaSchema')
 
 class MediaSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = Media
+
+class FacilityReviewSchema(ma.SQLAlchemyAutoSchema):
+    class Meta:
+        model = FacilityReview
 
 class RecareaSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
@@ -84,8 +98,11 @@ facilities_schema = FacilitySchema(many=True)
 media_schema = MediaSchema()
 medias_schema = MediaSchema(many=True)
 
-recarea_schema = MediaSchema()
-recareas_schema = MediaSchema(many=True)
+facility_review_schema = FacilityReviewSchema()
+facility_reviews_schema = FacilityReviewSchema(many=True)
+
+recarea_schema = RecareaSchema()
+recareas_schema = RecareaSchema(many=True)
 
 user_schema = UserSchema()
 users_schema = UserSchema(many=True)
@@ -127,13 +144,41 @@ def login_user() -> None:
         return jsonify({ 'status': False, 'message': 'Session expired' })
 
 @app.route('/api/facility/detail', methods=['POST'])
-def get_campground() -> None:
+def get_facility() -> None:
     try:
         facility_id: str = request.get_json()['facility_id']
         facility: Facility = Facility.query.get(facility_id)
         if facility:
             return jsonify({ 'status': True, 'facility': facility_schema.dump(facility) })
         return jsonify({ 'status': False, 'message': 'Facility not found' })
+    except Exception as e:
+        return jsonify({ 'status': False, 'message': 'An error occurred' })
+
+@app.route('/api/facility/availability', methods=['POST'])
+def get_facility_availability() -> None:
+    try:
+        facility_id: str = request.get_json()['facility_id']
+        date: str = request.get_json()['date']
+        params = { 'start_date': datetime.strptime(date, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%Y-%m-01T00:00:00.000Z") }
+        headers = {
+            'Accept': '*/*',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Host': 'www.recreation.gov',
+            'User-Agent': 'PostmanRuntime/7.26.10',
+        }
+        url = 'https://www.recreation.gov/api/camps/availability/campground/{id}/month'.format(id=facility_id)
+        response = requests.get(url, params=params, headers=headers)
+        res = response.json()
+
+        availability = []
+        if res['count'] and res['count'] > 0:
+            for data in res['campsites'].items():
+                for date, status in data['availabilities'].items():
+                    if status == 'Available':
+                        availability.append(date)
+
+        return jsonify({ 'status': True, 'availability': availability })
     except Exception as e:
         return jsonify({ 'status': False, 'message': 'An error occurred' })
 
